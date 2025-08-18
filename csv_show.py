@@ -1,6 +1,7 @@
 import sys
 import os
 import csv
+import chardet
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
     QFileDialog, QLabel, QMessageBox, QTextEdit
@@ -18,8 +19,10 @@ import mplcursors
 class CSVWaveformViewer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("IV/PV 波形查看器")
-        self.resize(1100, 700)
+        self.setWindowTitle("IV/PV 波形查看器")   # ✅ 保持原样
+        self.resize(1100, 700)                  # ✅ 保持原样
+        self.setFocusPolicy(Qt.StrongFocus)  # >>> 新增，确保窗口能接收键盘事件
+
 
         main_layout = QHBoxLayout()
 
@@ -74,6 +77,18 @@ class CSVWaveformViewer(QWidget):
         self.fig, self.ax1 = plt.subplots(figsize=(7, 5))
         self.canvas = FigureCanvas(self.fig)
         right_layout.addWidget(self.canvas, stretch=1)
+
+        # >>> 新增：右下角的“上一张 / 下一张”按钮
+        self.prev_btn = QPushButton("上一张")
+        self.next_btn = QPushButton("下一张")
+        self.prev_btn.clicked.connect(self.show_previous_csv)
+        self.next_btn.clicked.connect(self.show_next_csv)
+
+        nav_layout = QHBoxLayout()
+        nav_layout.addWidget(self.prev_btn)
+        nav_layout.addWidget(self.next_btn)
+        right_layout.addLayout(nav_layout)
+
         main_layout.addLayout(right_layout, stretch=1)
         self.setLayout(main_layout)
 
@@ -93,15 +108,55 @@ class CSVWaveformViewer(QWidget):
         self.mpp_marker_iv = None
         self.mpp_marker_pv = None
 
+        # >>> 新增：文件列表和索引
+        self.csv_files = []
+        self.current_index = -1
+
     def load_and_plot(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择 CSV 文件", "", "CSV Files (*.csv)")
         if not path:
             return
 
         try:
-            self.current_csv_path = path
-            with open(path, 'r', encoding='gbk') as f:
+            # >>> 新增：记录文件夹下所有 csv，并使用绝对路径避免 ValueError
+            folder = os.path.dirname(path)
+            self.csv_files = sorted([os.path.abspath(os.path.join(folder, f))
+                                    for f in os.listdir(folder) if f.lower().endswith(".csv")])
+            self.current_index = self.csv_files.index(os.path.abspath(path))
+
+            # 调用通用 CSV 加载函数
+            self.load_csv(path)
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载 CSV 失败：\n{e}")
+
+    # >>> 新增：键盘左右键切换
+    def keyPressEvent(self, event):
+        if not hasattr(self, 'csv_files') or not self.csv_files:
+            return super().keyPressEvent(event)
+
+        if event.key() == Qt.Key_Right:   # 右箭头：下一张
+            self.current_index = (self.current_index + 1) % len(self.csv_files)
+            self.load_csv(self.csv_files[self.current_index])
+        elif event.key() == Qt.Key_Left:  # 左箭头：上一张
+            self.current_index = (self.current_index - 1) % len(self.csv_files)
+            self.load_csv(self.csv_files[self.current_index])
+        else:
+            super().keyPressEvent(event)
+
+    # >>> 新增：封装 csv 加载函数
+    def load_csv(self, path):
+        try:
+            # 自动检测编码
+            with open(path, 'rb') as f:
+                rawdata = f.read()
+                result = chardet.detect(rawdata)
+                encoding = result['encoding']  # 识别编码
+                
+            with open(path, 'r', encoding=encoding) as f:
                 lines = f.readlines()
+            
+            self.current_csv_path = path
 
             start_index = -1
             for idx, line in enumerate(lines):
@@ -111,7 +166,6 @@ class CSVWaveformViewer(QWidget):
             if start_index == -1:
                 raise ValueError("未找到有效数据头 Current,Voltage")
 
-            # ✅ 查找 Test date 行
             test_date_index = -1
             for idx, line in enumerate(lines):
                 if "Test date" in line:
@@ -121,7 +175,6 @@ class CSVWaveformViewer(QWidget):
             if test_date_index == -1 or test_date_index >= start_index:
                 raise ValueError("无法找到 Test date 到数据头之间的内容")
 
-            # ✅ 只展示 Test date 和 Current 之间的内容（不含 Test date 行和数据头行）
             param_lines = lines[test_date_index + 1 : start_index]
             self.param_text.setPlainText(''.join(param_lines).strip())
 
@@ -150,6 +203,17 @@ class CSVWaveformViewer(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载或解析 CSV 失败：\n{e}")
+
+    # >>> 新增：上一张 / 下一张
+    def show_previous_csv(self):
+        if self.csv_files and self.current_index > 0:
+            self.current_index -= 1
+            self.load_csv(self.csv_files[self.current_index])
+
+    def show_next_csv(self):
+        if self.csv_files and self.current_index < len(self.csv_files) - 1:
+            self.current_index += 1
+            self.load_csv(self.csv_files[self.current_index])
 
     def plot_curves(self):
         self.fig.clf()
